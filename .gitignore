@@ -1,0 +1,29 @@
+# Python virtual environment & bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data files & local logs (Never commit raw telemetry data)
+*.log
+*.json
+*.csv
+*.parquet
+
+# DuckDB database artifacts
+*.duckdb
+*.duckdb.wal
+*.tmp/
+
+# IDE & OS configuration
+.vscode/
+.idea/
+.DS_Store
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+EOF
