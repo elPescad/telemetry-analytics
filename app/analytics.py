@@ -60,7 +60,10 @@ def compute_event_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("event_type").filter(pl.col("event_type") == "share_event").count().alias("shares"),
         )
         .with_columns(
-            (pl.col("rsvps") / pl.col("views") * 100).fill_nan(0.0).round(1).alias("conversion_rate_pct")
+            pl.when(pl.col("views") > 0)
+            .then((pl.col("rsvps") / pl.col("views") * 100).round(1))
+            .otherwise(0.0)
+            .alias("conversion_rate_pct")
         )
         .sort("rsvps", descending=True)
     )
@@ -78,7 +81,10 @@ def compute_post_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("event_type").filter(pl.col("event_type") == "view_comments").count().alias("comment_views"),
         )
         .with_columns(
-            ((pl.col("likes") + pl.col("comment_views")) / pl.col("views") * 100).fill_nan(0.0).round(1).alias("engagement_rate_pct")
+            pl.when(pl.col("views") > 0)
+            .then(((pl.col("likes") + pl.col("comment_views")) / pl.col("views") * 100).round(1))
+            .otherwise(0.0)
+            .alias("engagement_rate_pct")
         )
         .sort("views", descending=True)
     )

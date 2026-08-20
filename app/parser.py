@@ -1,20 +1,28 @@
 import json
+import time
+import gzip
+import io
 from pathlib import Path
 import polars as pl
+from google.cloud import storage
 from app.models import TelemetryRegistry
+
 
 class LogParser:
 
-    def __init__(self, log_path: str):
-        self.log_path = Path(log_path)
+    def __init__(self, log_source: str | Path | io.StringIO):
+        self.log_source = log_source
 
-    # Loads raw json log
     def load_raw(self) -> pl.DataFrame:
-        if not self.log_path.exists():
-            raise FileNotFoundError(f"Cannot find log file at {self.log_path}")
-        return pl.read_ndjson(self.log_path)
+        """Loads raw NDJSON from a local file path or an in-memory string stream."""
+        if isinstance(self.log_source, io.StringIO):
+            return pl.read_ndjson(self.log_source)
+        
+        path = Path(self.log_source)
+        if not path.exists():
+            raise FileNotFoundError(f"Cannot find log file at {path}")
+        return pl.read_ndjson(path)
 
-    # Makes sure the json isn't corrupted
     @staticmethod
     def _safe_json_parse(payload_str: str | None) -> dict | None:
         """Safely parses JSON strings, returning None for corrupted rows."""
@@ -24,22 +32,20 @@ class LogParser:
             return json.loads(payload_str)
         except Exception:
             try:
-                # Fallback: fix single quotes if present
                 return json.loads(payload_str.replace("'", '"'))
             except Exception:
                 return None
 
-    # Parses the metadata within the json and promotes to new columns
     def parse_events(self) -> pl.DataFrame:
         df = self.load_raw()
 
         payload_schema = pl.Struct(
             {
-                "e": pl.String, #event
-                "id": pl.String, #target id
-                "t": pl.Int64, #metric value
-                "u": pl.String,  #user id
-                "yr": pl.String #college Year (Fresh, Soph, etc)
+                "e": pl.String,   # Event type
+                "id": pl.String,  # Target ID
+                "t": pl.Int64,    # Metric value
+                "u": pl.String,   # User ID
+                "yr": pl.String   # College Year
             }
         )
 
@@ -64,13 +70,8 @@ class LogParser:
             )
         )
 
-        # Corrupted logs without ant event_type are filtered out
-        cleaned_result = result.filter(
-            pl.col("event_type").is_not_null()
-        )
-        return cleaned_result
+        return result.filter(pl.col("event_type").is_not_null())
 
-    # Organize events into master class TelemetryRegistry
     def organize_events(self, cleaned_df: pl.DataFrame) -> TelemetryRegistry:
         post_events_type = [
             "view_post", "view_comments", "like", "unlike", 
@@ -87,9 +88,7 @@ class LogParser:
             "check_rank", "profile_press"
         ]
 
-        session_types = [
-            "session_start", "session_end"
-        ]
+        session_types = ["session_start", "session_end"]
 
         posts_df = cleaned_df.filter(pl.col("event_type").is_in(post_events_type))
         events_df = cleaned_df.filter(pl.col("event_type").is_in(event_rsvp_types))
@@ -107,3 +106,38 @@ class LogParser:
             other=other_df
         )
 
+    @staticmethod
+    def load_cloud_telemetry(bucket_name: str, max_lookback_days: int = 28) -> pl.DataFrame:
+        """
+        Fetches GCP log segments created within max_lookback_days,
+        skipping older files entirely to optimize memory and bandwidth.
+        """
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix="segment_")
+
+        cutoff_timestamp = int(time.time()) - (max_lookback_days * 86400)
+        
+        dfs = []
+        for blob in blobs:
+            if not blob.name.endswith(".gz"):
+                continue
+
+            try:
+                file_timestamp = int(blob.name.split("_")[1].split(".")[0])
+                if file_timestamp < cutoff_timestamp:
+                    continue
+            except (IndexError, ValueError):
+                pass
+
+            compressed_bytes = blob.download_as_bytes()
+            decompressed_text = gzip.decompress(compressed_bytes).decode("utf-8")
+            
+            # Now safely works with io.StringIO streams
+            parser = LogParser(io.StringIO(decompressed_text))
+            dfs.append(parser.parse_events())
+
+        if not dfs:
+            return pl.DataFrame()
+
+        return pl.concat(dfs, rechunk=True)
