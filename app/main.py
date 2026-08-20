@@ -13,12 +13,12 @@ def main():
     try:
         cleaned_df = parser.parse_events()
         
-        # 1. ALWAYS RUN: Real-time Student Leaderboard (All-Time or Active)
+        #ALWAYS RUN: Real-time Student Leaderboard (All-Time or Active)
         student_leaderboard = compute_student_weighted_scores(cleaned_df)
         print("--- STUDENT LEADERBOARD ---")
         print(student_leaderboard)
 
-        # 2. WEEKLY REPORT: Runs on Fridays over a 7-day lookback window
+        #WEEKLY REPORT: Runs on Fridays over a 7-day lookback window
         if is_weekly_report_day():
             print("\n--- FRIDAY WEEKLY SUMMARY (LAST 7 DAYS) ---")
             weekly_df = filter_by_days(cleaned_df, days=7)
@@ -29,7 +29,7 @@ def main():
             print("Weekly Posts Engagement:")
             print(compute_post_performance(weekly_df))
 
-        # 3. MONTHLY REPORT: Runs on the 1st of the month over a 28-day lookback window
+        #MONTHLY REPORT: Runs on the 1st of the month over a 28-day lookback window
         if is_monthly_report_day():
             print("\n--- MONTHLY SUMMARY (LAST 28 DAYS / 4 WEEKS) ---")
             monthly_df = filter_by_days(cleaned_df, days=28)
