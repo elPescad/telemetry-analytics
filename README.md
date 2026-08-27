@@ -1,47 +1,52 @@
 # Telemetry Analytics Pipeline
 
-A fast, memory-optimized Python telemetry ingestion and analytics engine built with **Polars** and **Google Cloud Storage**. The pipeline streams compressed `.gz` log files from GCP, safely parses unnested NDJSON payloads, aggregates student activity metrics, and outputs a JSON cache for frontend API consumption.
-
-[Source](https://github.com/elPescad/telemetry-analytics/tree/master/app)
----
-
-**Core Architecture**
-
-* **`app/parser.py` (`LogParser`)**: Connects to GCP Storage, filters log files by a 28-day timestamp cutoff to minimize bandwidth, decompresses stream data in memory, handles corrupted JSON rows, and maps raw event schema to normalized Polars DataFrames.
-* **`app/models.py` (`TelemetryRegistry`)**: Defines a strongly typed dataclass storing categorized DataFrames (`posts`, `events`, `feed_ui`, `sessions`, `other`).
-* **`app/analytics.py`**: Computes weighted user engagement leaderboards, event funnel conversion rates, post engagement percentages, and time-windowing logic.
-* **`main.py`**: Entry point executing cloud ingestion, running time-based checks (Fridays for weekly reports, 1st of the month for monthly reports), logging terminal summaries, and caching results to disk.
+A high-performance, memory-optimized Python telemetry ingestion and analytics engine built with **Polars**, **Google Cloud Storage**, and **FPDF**. The pipeline streams compressed `.gz` log files from GCP, safely parses unnested NDJSON payloads using Rust-native JSON decoders, aggregates student activity metrics, and outputs both a JSON cache for frontend consumption and an executive PDF summary report.
 
 ---
 
-**Analytics Metrics & Formulas**
+### Core Architecture
+
+* **`app/parser.py` (`LogParser`)**: Connects to GCP Storage, pre-filters log blobs by timestamp to reduce network I/O, safely decompresses GZIP streams in-memory, uses native Rust `json_decode` with type fallback, concatenates chunks diagonally (`how="diagonal"`) to defend against schema drift, and maps raw events into structured DataFrames.
+* **`app/models.py` (`TelemetryRegistry`)**: Defines strongly typed dataclasses with safe default factories (`pl.DataFrame`) to guarantee non-null DataFrames across all categories (`posts`, `events`, `feed_ui`, `sessions`, `other`).
+* **`app/analytics.py`**: Computes weighted user engagement leaderboards, handles student state transitions (e.g., class year updates), deduplicates monthly event attendance, and calculates post engagement rates.
+* **`app/pdf_generator.py` (`ExecutiveAnalyticsPDF`)**: Renders `Monthly_Summary_Report.pdf` featuring auto-paginated metric tables, dynamic header re-printing, Latin-1/Unicode string sanitization, and structured leaderboards.
+* **`main.py`**: Pipeline entry point that executes cloud ingestion, handles schedule triggers (Fridays for weekly reports, 1st of the month for monthly summaries), and exports both JSON and PDF report artifacts.
+
+---
+
+### Analytics Metrics & Formulas
 
 | Metric | Calculation / Weighting | Target Events |
 | :--- | :--- | :--- |
-| **User Leaderboard Score** | `(RSVPs × 10) + (Posts × 5) + (Likes × 1)` | `rsvp_success`, `create_post_start`, `like` |
-| **Event Conversion Rate** | `(RSVPs / Views) * 100` | `view_event`, `rsvp_click`, `rsvp_success`, `share_event` |
-| **Post Engagement Rate** | `((Likes + Comment Views) / Views) * 100` | `view_post`, `like`, `view_comments` |
+| **User Leaderboard Score** | `(Attended × 15) + (Posts × 5) + (Likes × 1)` | `qr_scan_success`, `create_post_start`, `like` |
+| **Event Turnout %** | `(Actual Attended / RSVPs) × 100` | `qr_scan_success`, `rsvp_success` |
+| **RSVP-to-Attendance Ratio** | `Total RSVPs / Actual Attended` | `rsvp_success`, `qr_scan_success` |
+| **Post Engagement Rate %** | `((Likes + Comment Views) / Views) × 100` | `like`, `view_comments`, `view_post` |
 
 ---
 
-**Environment & Setup**
+### Environment & Setup
 
-Ensure active Google Cloud credentials are set in your environment (e.g., `GOOGLE_APPLICATION_CREDENTIALS`).
+Ensure active Google Cloud credentials are configured in your environment (e.g., `GOOGLE_APPLICATION_CREDENTIALS`).
 
 ```bash
-# Dependencies
-pip install polars google-cloud-storage
+# Install dependencies
+pip install polars google-cloud-storage fpdf2
 
 # Set your GCP Bucket environment variable
 export GCP_BUCKET_NAME="your-gcp-bucket-name"
 
 # Run the pipeline
-python main.py
+python main.py```
 ```
 ---
-**Pipeline Output**
-Running main.py produces terminal summary logs based on calendar triggers and exports analytics_cache.json containing:
-* `last_updated`: ISO-formatted UTC timestamp.
-* `student_leaderboard`: Full ranked student scores over the last 28 days.
-* `weekly`: 7-day post engagement and event funnel metrics.
-* `monthly`: 28-day post engagement and event funnel metrics.
+**Generated Pipeline Artifacts**
+Running main.py evaluates date triggers and produces two primary outputs:
+1. **analytics_cache.json**: Data cache containing:
+     * last_updated: ISO-8859/UTC generation timestamp.
+     * weekly: 7-day filtered event funnels, post metrics, and student scores.
+     * monthly: 30-day aggregated and deduplicated performance rollups.
+2. **Monthly_Summary_Report.pdf**: Printable executive document containing:
+     * Top 25 Student Leaderboard: Ranked user activity scores and verified check-ins.
+     * Top 12 Event Performance Summary: Views, RSVPs, actual attendance, and turnout percentages.
+     * Top 15 Post Engagements: View counts, likes, comment views, and engagement ratios.
