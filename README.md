@@ -1,5 +1,7 @@
 # Telemetry Analytics Pipeline
 
+**[Source](https://github.com/elPescad/telemetry-analytics/tree/master/app)**
+
 A high-performance, memory-optimized Python telemetry ingestion and analytics engine built with **Polars**, **Google Cloud Storage**, and **FPDF**. The pipeline streams compressed `.gz` log files from GCP, safely parses unnested NDJSON payloads using Rust-native JSON decoders, aggregates student activity metrics, and outputs both a JSON cache for frontend consumption and an executive PDF summary report.
 
 ---
