@@ -2,11 +2,14 @@ import json
 import time
 import gzip
 import io
+import logging
 from pathlib import Path
 import polars as pl
 from google.cloud import storage
+from google.cloud.exceptions import GoogleCloudError
 from app.models import TelemetryRegistry
 
+logger = logging.getLogger(__name__)
 
 class LogParser:
 
@@ -14,17 +17,36 @@ class LogParser:
         self.log_source = log_source
 
     def load_raw(self) -> pl.DataFrame:
-        """Loads raw NDJSON from a local file path or an in-memory byte/string stream."""
-        if isinstance(self.log_source, (io.StringIO, io.BytesIO)):
-            return pl.read_ndjson(self.log_source)
-        
-        path = Path(self.log_source)
-        if not path.exists():
-            raise FileNotFoundError(f"Cannot find log file at {path}")
-        return pl.read_ndjson(path)
+        """Loads raw NDJSON safely from a local file path or an in-memory stream."""
+        try:
+            if isinstance(self.log_source, (io.StringIO, io.BytesIO)):
+                return pl.read_ndjson(self.log_source)
+            
+            path = Path(self.log_source)
+            if not path.exists():
+                logger.error(f"Cannot find log file at {path}")
+                return pl.DataFrame()
+                
+            return pl.read_ndjson(path)
+        except pl.exceptions.NoDataError:
+            logger.warning("Encountered empty NDJSON file/stream. Skipping.")
+            return pl.DataFrame()
+        except Exception as e:
+            logger.error(f"Failed to load raw NDJSON: {e}")
+            return pl.DataFrame()
 
     def parse_events(self) -> pl.DataFrame:
         df = self.load_raw()
+
+        if df.is_empty():
+            return pl.DataFrame()
+
+        # Defend against schema drift: Ensure required top-level columns exist
+        required_cols = ["payload", "timestamp"]
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        if missing_cols:
+            logger.warning(f"Skipping malformed segment missing columns: {missing_cols}")
+            return pl.DataFrame()
 
         payload_schema = pl.Struct(
             {
@@ -36,34 +58,49 @@ class LogParser:
             }
         )
 
-        # High-performance native Rust JSON decoding (bypasses slow Python GIL loops)
-        result = (
-            df.with_columns(
-                pl.col("payload")
-                .str.json_decode(dtype=payload_schema, strict=False)
+        try:
+            # High-performance native Rust JSON decoding
+            result = (
+                df.with_columns(
+                    pl.col("payload")
+                    .str.json_decode(dtype=payload_schema, strict=False)
+                )
+                .unnest("payload")
+                .rename(
+                    {
+                        "timestamp": "server_timestamp", 
+                        "e": "event_type", 
+                        "id": "target_id", 
+                        "t": "metric_value",
+                        "u": "user_id",
+                        "yr": "college_year"
+                    }
+                )
             )
-            .unnest("payload")
-            .rename(
-                {
-                    "timestamp": "server_timestamp", 
-                    "e": "event_type", 
-                    "id": "target_id", 
-                    "t": "metric_value",
-                    "u": "user_id",
-                    "yr": "college_year"
-                }
-            )
-        )
 
-        return result.filter(pl.col("event_type").is_not_null())
+            return result.filter(pl.col("event_type").is_not_null())
+        except Exception as e:
+            logger.error(f"Error during dataframe schema transformation: {e}")
+            return pl.DataFrame()
 
     def organize_events(self, cleaned_df: pl.DataFrame) -> TelemetryRegistry:
+        if cleaned_df.is_empty():
+            empty = pl.DataFrame()
+            return TelemetryRegistry(posts=empty, events=empty, feed_ui=empty, sessions=empty, other=empty)
+
+        # Defend against missing event_type column
+        if "event_type" not in cleaned_df.columns:
+            logger.error("Cannot organize events: 'event_type' column missing.")
+            return TelemetryRegistry(
+                posts=pl.DataFrame(), events=pl.DataFrame(), 
+                feed_ui=pl.DataFrame(), sessions=pl.DataFrame(), other=cleaned_df
+            )
+
         post_events_type = [
             "view_post", "view_comments", "like", "unlike", 
             "delete_post", "create_post_start", "create_post_cancel"
         ]
 
-        # Added qr_scan_success to match analytics.py
         event_rsvp_types = [
             "view_event", "rsvp_click", "rsvp_success", 
             "rsvp_cancel", "share_event", "qr_scan_success"
@@ -95,35 +132,52 @@ class LogParser:
     @staticmethod
     def load_cloud_telemetry(bucket_name: str, max_lookback_days: int = 14) -> pl.DataFrame:
         """
-        Fetches GCP log segments created within max_lookback_days (defaults to 14 matching bucket lifecycle),
-        skipping older files entirely to optimize memory and bandwidth.
+        Fetches GCP log segments created within max_lookback_days,
+        skipping older or corrupted files entirely to optimize memory and ensure pipeline stability.
         """
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(bucket_name)
-        blobs = bucket.list_blobs(prefix="segment_")
+        try:
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blobs = bucket.list_blobs(prefix="segment_")
+        except GoogleCloudError as e:
+            logger.error(f"Failed to connect to GCP Bucket {bucket_name}: {e}")
+            return pl.DataFrame()
 
         cutoff_timestamp = int(time.time()) - (max_lookback_days * 86400)
-        
         dfs = []
+        
         for blob in blobs:
             if not blob.name.endswith(".gz"):
                 continue
 
             try:
+                # Extract timestamp safely
                 file_timestamp = int(blob.name.split("_")[1].split(".")[0])
                 if file_timestamp < cutoff_timestamp:
                     continue
             except (IndexError, ValueError):
+                logger.warning(f"Malformed blob name, skipping time check: {blob.name}")
                 pass
 
-            compressed_bytes = blob.download_as_bytes()
-            decompressed_bytes = gzip.decompress(compressed_bytes)
-            
-            # Pass raw decompressed bytes directly via BytesIO stream
-            parser = LogParser(io.BytesIO(decompressed_bytes))
-            dfs.append(parser.parse_events())
+            # Fault-tolerant download and decompression block
+            try:
+                compressed_bytes = blob.download_as_bytes()
+                decompressed_bytes = gzip.decompress(compressed_bytes)
+                
+                parser = LogParser(io.BytesIO(decompressed_bytes))
+                parsed_df = parser.parse_events()
+                
+                if not parsed_df.is_empty():
+                    dfs.append(parsed_df)
+                    
+            except gzip.BadGzipFile:
+                logger.error(f"Corrupted GZIP file skipped: {blob.name}")
+            except Exception as e:
+                logger.error(f"Failed to process blob {blob.name}: {e}")
 
         if not dfs:
+            logger.warning("No valid telemetry data parsed from cloud.")
             return pl.DataFrame()
 
+        # Concatenate and trigger Rust-level memory realignment
         return pl.concat(dfs, rechunk=True)

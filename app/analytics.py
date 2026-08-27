@@ -10,6 +10,9 @@ WEIGHT_LIKE = 1
 
 def filter_by_days(cleaned_df: pl.DataFrame, days: int) -> pl.DataFrame:
     """Filters logs to only include entries from the last N days based on server_timestamp."""
+    if cleaned_df.is_empty():
+        return cleaned_df
+        
     cutoff_epoch = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
     return cleaned_df.filter(pl.col("server_timestamp") >= cutoff_epoch)
 
@@ -25,7 +28,9 @@ def is_monthly_report_day() -> bool:
 # --- RAW LOG AGGREGATION ENGINES (WEEKLY) ---
 
 def compute_student_weighted_scores(cleaned_df: pl.DataFrame) -> pl.DataFrame:
-    """Calculates student score leaderboards alongside a broad count and explicit list of events attended."""
+    if cleaned_df.is_empty() or "user_id" not in cleaned_df.columns:
+        return pl.DataFrame()
+
     return (
         cleaned_df
         .filter(pl.col("user_id").is_not_null())
@@ -34,12 +39,14 @@ def compute_student_weighted_scores(cleaned_df: pl.DataFrame) -> pl.DataFrame:
             # Broad metric: Total count of distinct event check-ins
             pl.col("target_id")
             .filter((pl.col("event_type") == "qr_scan_success") & pl.col("target_id").is_not_null())
+            .drop_nulls()  # CRITICAL: Prevents [null] from being counted as 1
             .n_unique()
             .alias("attend_count"),
 
             # Specific drill-down: Array of unique event IDs attended by this user
             pl.col("target_id")
             .filter((pl.col("event_type") == "qr_scan_success") & pl.col("target_id").is_not_null())
+            .drop_nulls()
             .unique()
             .alias("attended_event_ids"),
 
@@ -58,7 +65,9 @@ def compute_student_weighted_scores(cleaned_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 def compute_event_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
-    """Aggregates event performance stats alongside total attendee counts and explicit user attendee lists."""
+    if cleaned_df.is_empty() or "target_id" not in cleaned_df.columns:
+        return pl.DataFrame()
+
     return (
         cleaned_df
         .filter(pl.col("target_id").is_not_null())
@@ -71,12 +80,14 @@ def compute_event_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
             # Broad metric: Total actual attendance count
             pl.col("user_id")
             .filter((pl.col("event_type") == "qr_scan_success") & pl.col("user_id").is_not_null())
+            .drop_nulls()
             .n_unique()
             .alias("actual_attended"),
 
             # Specific drill-down: Array of unique user IDs who attended this event
             pl.col("user_id")
             .filter((pl.col("event_type") == "qr_scan_success") & pl.col("user_id").is_not_null())
+            .drop_nulls()
             .unique()
             .alias("attendee_user_ids"),
         )
@@ -88,14 +99,16 @@ def compute_event_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
 
             pl.when(pl.col("total_rsvps") > 0)
             .then((pl.col("actual_attended") / pl.col("total_rsvps") * 100).round(1))
-            .otherwise(0.0)
+            .otherwise(0.0)  # Walk-ins with 0 RSVPs will default to 0.0% to avoid infinity bugs
             .alias("turnout_vs_rsvp_pct")
         )
         .sort("actual_attended", descending=True)
     )
 
 def compute_post_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
-    """Aggregates post engagement metrics (views, likes, comments) and engagement rate."""
+    if cleaned_df.is_empty() or "target_id" not in cleaned_df.columns:
+        return pl.DataFrame()
+
     return (
         cleaned_df
         .filter(pl.col("target_id").is_not_null())
@@ -118,12 +131,17 @@ def compute_post_performance(cleaned_df: pl.DataFrame) -> pl.DataFrame:
 
 # --- SUMMARY ROLLUP ENGINES (MONTHLY) ---
 
+def _get_valid_dfs(dfs: list[pl.DataFrame]) -> list[pl.DataFrame]:
+    """Helper to strip out empty dataframes to prevent pl.concat crashes."""
+    return [df for df in dfs if not df.is_empty()]
+
 def compute_monthly_post_performance(weekly_post_dfs: list[pl.DataFrame]) -> pl.DataFrame:
-    """Combines weekly post summary DataFrames into a single monthly post engagement report."""
-    combined_df = pl.concat(weekly_post_dfs)
+    valid_dfs = _get_valid_dfs(weekly_post_dfs)
+    if not valid_dfs:
+        return pl.DataFrame()
 
     return (
-        combined_df
+        pl.concat(valid_dfs)
         .group_by("target_id")
         .agg(
             pl.col("views").sum(),
@@ -140,15 +158,16 @@ def compute_monthly_post_performance(weekly_post_dfs: list[pl.DataFrame]) -> pl.
     )
 
 def compute_monthly_student_scores(weekly_student_dfs: list[pl.DataFrame]) -> pl.DataFrame:
-    """Flattens weekly student summaries, deduplicating lists to generate accurate monthly drill-downs."""
-    combined_df = pl.concat(weekly_student_dfs)
+    valid_dfs = _get_valid_dfs(weekly_student_dfs)
+    if not valid_dfs:
+        return pl.DataFrame()
 
     return (
-        combined_df
+        pl.concat(valid_dfs)
         .group_by(["user_id", "college_year"])
         .agg(
-            # Replaced .flatten() with .list.explode() for Polars 2.0+ compatibility
-            pl.col("attended_event_ids").list.explode().unique().alias("attended_event_ids"),
+            # .explode() flattens the list of lists. drop_nulls() removes empty entries before unique()
+            pl.col("attended_event_ids").explode().drop_nulls().unique().alias("attended_event_ids"),
             pl.col("post_count").sum(),
             pl.col("like_count").sum(),
         )
@@ -167,17 +186,18 @@ def compute_monthly_student_scores(weekly_student_dfs: list[pl.DataFrame]) -> pl
     )
 
 def compute_monthly_event_performance(weekly_event_dfs: list[pl.DataFrame]) -> pl.DataFrame:
-    """Flattens weekly event summaries, deduplicating attendee user IDs for monthly event reports."""
-    combined_df = pl.concat(weekly_event_dfs)
+    valid_dfs = _get_valid_dfs(weekly_event_dfs)
+    if not valid_dfs:
+        return pl.DataFrame()
 
     return (
-        combined_df
+        pl.concat(valid_dfs)
         .group_by("target_id")
         .agg(
             pl.col("views").sum(),
             pl.col("total_rsvps").sum(),
-            # Replaced .flatten() with .list.explode() for Polars 2.0+ compatibility
-            pl.col("attendee_user_ids").list.explode().unique().alias("attendee_user_ids"),
+            # .explode() flattens the list of lists. drop_nulls() removes empty entries before unique()
+            pl.col("attendee_user_ids").explode().drop_nulls().unique().alias("attendee_user_ids"),
         )
         .with_columns(
             pl.col("attendee_user_ids").list.len().alias("actual_attended")

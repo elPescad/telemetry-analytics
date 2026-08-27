@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import polars as pl
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TelemetryRegistry: 
     posts: pl.DataFrame        # view_post, like, unlike, delete_post, comments, post creation
     events: pl.DataFrame       # view_event, rsvp_click, rsvp_success, rsvp_cancel, share_event, qr_scan_success
