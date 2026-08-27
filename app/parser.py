@@ -1,4 +1,3 @@
-import json
 import time
 import gzip
 import io
@@ -20,6 +19,8 @@ class LogParser:
         """Loads raw NDJSON safely from a local file path or an in-memory stream."""
         try:
             if isinstance(self.log_source, (io.StringIO, io.BytesIO)):
+                # Ensure we are reading from the start of the stream
+                self.log_source.seek(0)
                 return pl.read_ndjson(self.log_source)
             
             path = Path(self.log_source)
@@ -62,7 +63,9 @@ class LogParser:
             # High-performance native Rust JSON decoding
             result = (
                 df.with_columns(
-                    pl.col("payload")
+                    # If payload is accidentally parsed as a Struct instead of String by read_ndjson,
+                    # casting it to string first ensures json_decode never crashes.
+                    pl.col("payload").cast(pl.String)
                     .str.json_decode(dtype=payload_schema, strict=False)
                 )
                 .unnest("payload")
@@ -85,16 +88,13 @@ class LogParser:
 
     def organize_events(self, cleaned_df: pl.DataFrame) -> TelemetryRegistry:
         if cleaned_df.is_empty():
-            empty = pl.DataFrame()
-            return TelemetryRegistry(posts=empty, events=empty, feed_ui=empty, sessions=empty, other=empty)
+            # Thanks to our hardened dataclass, this safely initializes empty dfs!
+            return TelemetryRegistry()
 
         # Defend against missing event_type column
         if "event_type" not in cleaned_df.columns:
             logger.error("Cannot organize events: 'event_type' column missing.")
-            return TelemetryRegistry(
-                posts=pl.DataFrame(), events=pl.DataFrame(), 
-                feed_ui=pl.DataFrame(), sessions=pl.DataFrame(), other=cleaned_df
-            )
+            return TelemetryRegistry(other=cleaned_df)
 
         post_events_type = [
             "view_post", "view_comments", "like", "unlike", 
@@ -179,5 +179,5 @@ class LogParser:
             logger.warning("No valid telemetry data parsed from cloud.")
             return pl.DataFrame()
 
-        # Concatenate and trigger Rust-level memory realignment
-        return pl.concat(dfs, rechunk=True)
+        # how="diagonal" protects against minor schema variations between chunks
+        return pl.concat(dfs, how="diagonal", rechunk=True)

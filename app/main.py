@@ -18,7 +18,7 @@ from app.analytics import (
     is_weekly_report_day,
 )
 from app.parser import LogParser
-from app.pdf_generator import generate_monthly_pdf  # Imported PDF generator
+from app.pdf_generator import generate_monthly_pdf
 
 # Production Logging Configuration
 logging.basicConfig(
@@ -86,10 +86,14 @@ def main():
         event_summary_file = SUMMARIES_DIR / f"events_{week_key}.parquet"
         post_summary_file = SUMMARIES_DIR / f"posts_{week_key}.parquet"
 
-        weekly_students.write_parquet(student_summary_file)
-        weekly_events.write_parquet(event_summary_file)
-        weekly_posts.write_parquet(post_summary_file)
-        logging.info(f"Successfully saved weekly parquet summaries for week {week_key}")
+        # Guard against saving 0-column dataframes which crash Parquet engines and downstream concats
+        if weekly_students.width > 0 and weekly_events.width > 0 and weekly_posts.width > 0:
+            weekly_students.write_parquet(student_summary_file)
+            weekly_events.write_parquet(event_summary_file)
+            weekly_posts.write_parquet(post_summary_file)
+            logging.info(f"Successfully saved weekly parquet summaries for week {week_key}")
+        else:
+            logging.warning(f"Insufficient data to generate parquet summaries for week {week_key}. Skipping write.")
 
         # 4. Handle Monthly Rollups & Cache Preservation
         monthly_students_dict = []
@@ -101,7 +105,8 @@ def main():
         existing_cache = {}
         if CACHE_FILE.exists():
             try:
-                with open(CACHE_FILE, "r") as f:
+                # CRITICAL: Encoding added to prevent UnicodeDecodeError on validation load
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     existing_cache = json.load(f)
             except Exception as e:
                 logging.warning(f"Could not parse existing cache file: {e}")
@@ -115,12 +120,14 @@ def main():
                 m_events_df = compute_monthly_event_performance([pl.read_parquet(f) for f in e_files])
                 m_posts_df = compute_monthly_post_performance([pl.read_parquet(f) for f in p_files])
 
-                monthly_students_dict = m_students_df.to_dicts()
-                monthly_events_dict = m_events_df.to_dicts()
-                monthly_posts_dict = m_posts_df.to_dicts()
+                monthly_students_dict = m_students_df.to_dicts() if m_students_df.width > 0 else []
+                monthly_events_dict = m_events_df.to_dicts() if m_events_df.width > 0 else []
+                monthly_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
 
-                if not m_posts_df.is_empty():
-                    post_of_the_month = m_posts_df.head(1).to_dicts()[0]
+                # Safely extract post of the month
+                if m_posts_df.width > 0 and not m_posts_df.is_empty():
+                    top_posts = m_posts_df.head(1).to_dicts()
+                    post_of_the_month = top_posts[0] if top_posts else {}
         else:
             # Preserve existing monthly cache if not a monthly calculation day
             logging.info("Preserving existing monthly rollup cache.")
@@ -146,10 +153,10 @@ def main():
         # 6. Export Structured JSON Cache (Atomic Write)
         payload = {
             "last_updated": current_date.isoformat(),
-            "student_leaderboard": weekly_students.to_dicts(),
+            "student_leaderboard": weekly_students.to_dicts() if weekly_students.width > 0 else [],
             "weekly": {
-                "events": weekly_events.to_dicts(),
-                "posts": weekly_posts.to_dicts(),
+                "events": weekly_events.to_dicts() if weekly_events.width > 0 else [],
+                "posts": weekly_posts.to_dicts() if weekly_posts.width > 0 else [],
             },
             "monthly": {
                 "students": monthly_students_dict,
