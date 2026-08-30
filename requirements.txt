@@ -4,6 +4,8 @@ anyio==4.14.2
 click==8.4.2
 duckdb==1.5.5
 fastapi==0.141.1
+fpdf2
+google-cloud-storage
 h11==0.16.0
 httptools==0.8.0
 idna==3.18
