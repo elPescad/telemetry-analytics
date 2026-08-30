@@ -27,8 +27,12 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
-SUMMARIES_DIR = Path("summaries")
-CACHE_FILE = Path("analytics_cache.json")
+# Local Storage Directory Hierarchy
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+SUMMARIES_DIR = DATA_DIR / "summaries"
+CACHE_FILE = DATA_DIR / "analytics_cache.json"
+LOCAL_TEST_LOG = DATA_DIR / "hot_tier.log"
 
 
 def get_aligned_weekly_summaries(max_weeks: int = 4):
@@ -54,22 +58,31 @@ def get_aligned_weekly_summaries(max_weeks: int = 4):
 
 
 def main():
-    bucket_name = os.getenv("GCP_BUCKET_NAME")
-    if not bucket_name:
-        logging.critical("GCP_BUCKET_NAME environment variable is not set.")
-        sys.exit(1)
-
+    # Ensure local data directories exist
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # 1. Fetch raw telemetry logs from GCP
-        logging.info("Fetching cloud telemetry logs...")
+    bucket_name = os.getenv("GCP_BUCKET_NAME")
+    cleaned_df = None
+
+    # 1. Fetch telemetry logs (Cloud fallback to Local Test File)
+    if bucket_name:
+        logging.info(f"Fetching cloud telemetry logs from bucket: {bucket_name}...")
         cleaned_df = LogParser.load_cloud_telemetry(bucket_name, max_lookback_days=14)
+    elif LOCAL_TEST_LOG.exists():
+        logging.info(f"Local test mode active. Loading local log file: {LOCAL_TEST_LOG}")
+        cleaned_df = LogParser(LOCAL_TEST_LOG).parse_events() # Updated here
+    else:
+        logging.critical(
+            f"No GCP_BUCKET_NAME set and local test log file not found at: {LOCAL_TEST_LOG}"
+        )
+        sys.exit(1)
 
-        if cleaned_df is None or cleaned_df.is_empty():
-            logging.warning("No telemetry data retrieved from cloud. Exiting pipeline.")
-            return
+    if cleaned_df is None or cleaned_df.is_empty():
+        logging.warning("No telemetry data retrieved. Exiting pipeline.")
+        return
 
+    try:
         # 2. Compute 7-Day Weekly Metrics
         logging.info("Computing 7-day weekly analytics metrics...")
         weekly_raw_df = filter_by_days(cleaned_df, days=7)
@@ -86,12 +99,12 @@ def main():
         event_summary_file = SUMMARIES_DIR / f"events_{week_key}.parquet"
         post_summary_file = SUMMARIES_DIR / f"posts_{week_key}.parquet"
 
-        # Guard against saving 0-column dataframes which crash Parquet engines and downstream concats
+        # Guard against saving 0-column dataframes
         if weekly_students.width > 0 and weekly_events.width > 0 and weekly_posts.width > 0:
             weekly_students.write_parquet(student_summary_file)
             weekly_events.write_parquet(event_summary_file)
             weekly_posts.write_parquet(post_summary_file)
-            logging.info(f"Successfully saved weekly parquet summaries for week {week_key}")
+            logging.info(f"Successfully saved weekly parquet summaries to {SUMMARIES_DIR}")
         else:
             logging.warning(f"Insufficient data to generate parquet summaries for week {week_key}. Skipping write.")
 
@@ -101,11 +114,9 @@ def main():
         monthly_posts_dict = []
         post_of_the_month = {}
 
-        # Load existing cache to preserve monthly data on non-monthly calculation days
         existing_cache = {}
         if CACHE_FILE.exists():
             try:
-                # CRITICAL: Encoding added to prevent UnicodeDecodeError on validation load
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     existing_cache = json.load(f)
             except Exception as e:
@@ -124,12 +135,10 @@ def main():
                 monthly_events_dict = m_events_df.to_dicts() if m_events_df.width > 0 else []
                 monthly_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
 
-                # Safely extract post of the month
                 if m_posts_df.width > 0 and not m_posts_df.is_empty():
                     top_posts = m_posts_df.head(1).to_dicts()
                     post_of_the_month = top_posts[0] if top_posts else {}
         else:
-            # Preserve existing monthly cache if not a monthly calculation day
             logging.info("Preserving existing monthly rollup cache.")
             monthly_data = existing_cache.get("monthly", {})
             monthly_students_dict = monthly_data.get("students", [])
@@ -170,7 +179,6 @@ def main():
         with open(tmp_cache_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
-        # Atomic file replace prevents partial JSON read race conditions
         tmp_cache_path.replace(CACHE_FILE)
         logging.info(f"Successfully wrote updated frontend cache payload to {CACHE_FILE}")
 
@@ -179,7 +187,7 @@ def main():
             logging.info("Generating Monthly Executive PDF Report...")
             generate_monthly_pdf(
                 json_cache_path=str(CACHE_FILE),
-                output_pdf="Monthly_Executive_Summary.pdf",
+                output_pdf=str(DATA_DIR / "Monthly_Executive_Summary.pdf"),
             )
 
     except Exception as e:

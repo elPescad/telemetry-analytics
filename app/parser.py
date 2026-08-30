@@ -65,8 +65,7 @@ class LogParser:
                 df.with_columns(
                     # If payload is accidentally parsed as a Struct instead of String by read_ndjson,
                     # casting it to string first ensures json_decode never crashes.
-                    pl.col("payload").cast(pl.String)
-                    .str.json_decode(dtype=payload_schema, strict=False)
+                    pl.col("payload").cast(pl.String).str.json_decode(dtype=payload_schema)
                 )
                 .unnest("payload")
                 .rename(

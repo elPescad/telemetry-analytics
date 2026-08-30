@@ -23,7 +23,7 @@ class ExecutiveAnalyticsPDF(FPDF):
         self.ln(4)
 
         self.set_draw_color(226, 232, 240)
-        self.set_linewidth(0.4)
+        self.set_line_width(0.4)
         self.line(10, self.get_y(), 200, self.get_y())
         self.ln(6)
 
