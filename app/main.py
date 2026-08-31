@@ -17,6 +17,7 @@ from app.analytics import (
     is_monthly_report_day,
     is_weekly_report_day,
 )
+from app.enrichment import enrich_cache_payload
 from app.parser import LogParser
 from app.pdf_generator import generate_monthly_pdf
 
@@ -71,7 +72,7 @@ def main():
         cleaned_df = LogParser.load_cloud_telemetry(bucket_name, max_lookback_days=14)
     elif LOCAL_TEST_LOG.exists():
         logging.info(f"Local test mode active. Loading local log file: {LOCAL_TEST_LOG}")
-        cleaned_df = LogParser(LOCAL_TEST_LOG).parse_events() # Updated here
+        cleaned_df = LogParser(LOCAL_TEST_LOG).parse_events()
     else:
         logging.critical(
             f"No GCP_BUCKET_NAME set and local test log file not found at: {LOCAL_TEST_LOG}"
@@ -133,7 +134,7 @@ def main():
 
                 monthly_students_dict = m_students_df.to_dicts() if m_students_df.width > 0 else []
                 monthly_events_dict = m_events_df.to_dicts() if m_events_df.width > 0 else []
-                monthly_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
+                monthly_posts_dict = m_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
 
                 if m_posts_df.width > 0 and not m_posts_df.is_empty():
                     top_posts = m_posts_df.head(1).to_dicts()
@@ -159,7 +160,7 @@ def main():
             logging.info("--- MONTHLY SUMMARY ---")
             print("Post of the Month:", post_of_the_month)
 
-        # 6. Export Structured JSON Cache (Atomic Write)
+        # 6. Export Structured JSON Cache (Enriched & Atomic Write)
         payload = {
             "last_updated": current_date.isoformat(),
             "student_leaderboard": weekly_students.to_dicts() if weekly_students.width > 0 else [],
@@ -175,6 +176,13 @@ def main():
             },
         }
 
+        # Resolve UUIDs to human-readable names and titles via Supabase
+        try:
+            payload = enrich_cache_payload(payload)
+            logging.info("Successfully enriched cache payload with Supabase metadata.")
+        except Exception as e:
+            logging.warning(f"Skipping metadata enrichment due to error: {e}")
+
         tmp_cache_path = CACHE_FILE.with_suffix(".tmp")
         with open(tmp_cache_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -182,7 +190,7 @@ def main():
         tmp_cache_path.replace(CACHE_FILE)
         logging.info(f"Successfully wrote updated frontend cache payload to {CACHE_FILE}")
 
-        # 7. Generate Executive PDF Report if Monthly Trigger active
+        # 7. Generate Executive PDF Report (Reads Enriched JSON Cache)
         if is_monthly_report_day():
             logging.info("Generating Monthly Executive PDF Report...")
             generate_monthly_pdf(

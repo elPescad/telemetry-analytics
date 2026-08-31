@@ -1,3 +1,7 @@
+# Environment & Secrets
+.env
+.env.*
+
 # Python virtual environment & bytecode
 .venv/
 venv/
@@ -6,11 +10,11 @@ __pycache__/
 *$py.class
 *.so
 
-# Data files & local logs (Never commit raw telemetry data)
+# Data files, generated reports, & local logs
+data/
 *.log
-*.json
-*.csv
 *.parquet
+*.pdf
 
 # DuckDB database artifacts
 *.duckdb
@@ -26,4 +30,3 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-EOF
