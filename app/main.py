@@ -37,23 +37,29 @@ LOCAL_TEST_LOG = DATA_DIR / "hot_tier.log"
 
 
 def get_aligned_weekly_summaries(max_weeks: int = 4):
-    """
-    Safely retrieves up to `max_weeks` parquet files guaranteed to share 
-    matching week keys across all three telemetry categories.
-    """
     student_map = {f.name.replace("students_", ""): f for f in SUMMARIES_DIR.glob("students_*.parquet")}
     event_map = {f.name.replace("events_", ""): f for f in SUMMARIES_DIR.glob("events_*.parquet")}
     post_map = {f.name.replace("posts_", ""): f for f in SUMMARIES_DIR.glob("posts_*.parquet")}
 
-    # Find week keys present across all 3 sets
-    common_weeks = sorted(set(student_map.keys()) & set(event_map.keys()) & set(post_map.keys()))[-max_weeks:]
+    all_weeks = sorted(set(student_map.keys()) & set(event_map.keys()) & set(post_map.keys()))
 
-    if not common_weeks:
+    if not all_weeks:
         return [], [], []
 
-    s_files = [student_map[w] for w in common_weeks]
-    e_files = [event_map[w] for w in common_weeks]
-    p_files = [post_map[w] for w in common_weeks]
+    # 1. Evict files older than max_weeks (FIFO Cleanup)
+    if len(all_weeks) > max_weeks:
+        stale_weeks = all_weeks[:-max_weeks]
+        for w in stale_weeks:
+            student_map[w].unlink(missing_ok=True)
+            event_map[w].unlink(missing_ok=True)
+            post_map[w].unlink(missing_ok=True)
+            logging.info(f"Evicted stale summary logs for week: {w}")
+
+    # 2. Return active sliding window
+    active_weeks = all_weeks[-max_weeks:]
+    s_files = [student_map[w] for w in active_weeks]
+    e_files = [event_map[w] for w in active_weeks]
+    p_files = [post_map[w] for w in active_weeks]
 
     return s_files, e_files, p_files
 
@@ -134,7 +140,7 @@ def main():
 
                 monthly_students_dict = m_students_df.to_dicts() if m_students_df.width > 0 else []
                 monthly_events_dict = m_events_df.to_dicts() if m_events_df.width > 0 else []
-                monthly_posts_dict = m_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
+                monthly_posts_dict = m_posts_df.to_dicts() if m_posts_df.width > 0 else []
 
                 if m_posts_df.width > 0 and not m_posts_df.is_empty():
                     top_posts = m_posts_df.head(1).to_dicts()
